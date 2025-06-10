@@ -6,6 +6,9 @@ enable_testing()
 set(CMAKE_CUDA_ARCHITECTURES 89)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --default-stream per-thread -std=c++17 --expt-relaxed-constexpr -Xcompiler=-fPIE -Xcudafe --diag_suppress=611")
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -lineinfo -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611")
+set(CMAKE_CUDA_FLAGS_DEBUG "-O0 -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611 -g -G")
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/layers
