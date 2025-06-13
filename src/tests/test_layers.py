@@ -5,70 +5,66 @@ import numpy as np
 from my_layers.RMSNorm import RMSNorm
 
 def test_rmsnorm():
-        N = 128*128
-        eps = 1e-5
-        x = torch.ones(N)
-        for i in range(N):
-            x[i] = i
+    N = 128*128
+    eps = 1e-5
+    x = torch.ones(N)
+    for i in range(N):
+        x[i] = i
 
-        # Instantiate both modules
-        custom_rms = RMSNorm(N, eps=eps)
-        torch_rms = nn.RMSNorm(N, eps=eps)
+    # Instantiate both modules
+    custom_rms = RMSNorm(N, eps=eps)
+    torch_rms = nn.RMSNorm(N, eps=eps)
 
-        # Copy the weights to match exactly
-        with torch.no_grad():
-            torch_rms.weight.copy_(custom_rms.w)
+    # Copy the weights to match exactly
+    with torch.no_grad():
+        torch_rms.weight.copy_(custom_rms.w)
 
-        # Get outputs
-        out_custom = custom_rms(x)
-        out_torch = torch_rms(x)
+    # Get outputs
+    out_custom = custom_rms(x)
+    out_torch = torch_rms(x)
 
-        # npy from CUDA implementation
-        out_cuda_warp = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/rmsnorm_warp_opt.npy")
-        out_cuda_warp = torch.from_numpy(out_cuda_warp)
+    # npy from CUDA implementation
+    #out_cuda_warp = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/rmsnorm_warp_opt.npy")
+    #out_cuda_warp = torch.from_numpy(out_cuda_warp)
 
-        # Compare outputs
-        torch.testing.assert_close(out_custom, out_torch, rtol=1e-5, atol=1e-6)
-        torch.testing.assert_close(out_cuda_warp, out_torch, rtol=1e-5, atol=1e-6)
+    # Compare outputs
+    #torch.testing.assert_close(out_custom, out_torch, rtol=1e-5, atol=1e-6)
+    #torch.testing.assert_close(out_cuda_warp, out_torch, rtol=1e-5, atol=1e-6)
+
+    raise NotImplementedError
 
 def test_gemm_ABt_scale():
+    batch = 10
     M = 512
     K = 128
     N = 512
 
-    a = torch.zeros((M, K), dtype=torch.float32)
-    b = torch.zeros((N, K), dtype=torch.float32)
+    # Create batched tensors
+    a = torch.arange(M, dtype=torch.float32).view(1, M, 1).expand(batch, M, K)
+    b = torch.arange(N, dtype=torch.float32).view(1, N, 1).expand(batch, N, K)
 
-    for i in range(M):
-        for j in range(K):
-            a[i, j] = i
-
-    for i in range(M):
-        for j in range(K):
-            b[i, j] = i
-
-    torch_out = torch.matmul(a, b.transpose(0, 1)) / np.sqrt(K)
+    torch_out = torch.matmul(a, b.transpose(-1, -2)) / np.sqrt(K)
 
     cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_gemm_ABt_scale.npy")
-    cuda_out = torch.from_numpy(cuda_out)
-    cuda_out = torch.reshape(cuda_out, (M, N))
+    cuda_out = torch.from_numpy(cuda_out).reshape((batch, M, N))
 
     torch.testing.assert_close(torch_out, cuda_out, rtol=1e-5, atol=1e-6)
     
 
 def test_online_softmax():
-    N = 1024
-    x = torch.zeros(N, dtype=torch.float32)
-    for i in range(N):
-        x[i] = i * 2.2 + 0.3
+    batch = 10
+    N = 256
 
-    torch_out = nn.Softmax(x)
+    x = torch.arange(N, dtype=torch.float32) / 100 + 0.3    # shape: (N,)
+    x = x.expand(batch, -1).clone()                         # shape: (batch, N)
+
+    torch_softmax = nn.Softmax(dim=1)
+    torch_out = torch_softmax(x)
 
     cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_softmax_online.npy")
-    cuda_out = torch.from_numpy(cuda_out)
-    #torch.testing.assert_close(cuda_out, torch_out, rtol=1e-5, atol=1e-6)
-    print(cuda_out)
-    print(torch_out)
+    cuda_out = torch.from_numpy(cuda_out).reshape((batch, N))
+
+    torch.testing.assert_close(cuda_out, torch_out, rtol=1e-5, atol=1e-6)
 
 def test_scaled_dot_product_attention():
     
