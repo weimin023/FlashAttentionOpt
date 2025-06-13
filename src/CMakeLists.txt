@@ -29,8 +29,11 @@ add_executable(unittest unittest.cu)
 target_include_directories(unittest PRIVATE ${CNPY_INCLUDE_DIR} ${GTEST_INCLUDE_DIRS})
 target_link_libraries(unittest PRIVATE GTest::gtest_main cudadevrt)
 
-add_executable(rmsnorm layers/RMSNorm.cu)
+add_executable(rmsnorm my_layers/RMSNorm.cu)
 target_link_libraries(rmsnorm PRIVATE cudadevrt ${CNPY_LIBRARY})
+
+add_executable(selfAttention my_layers/selfAttention.cu)
+target_link_libraries(selfAttention PRIVATE cudadevrt ${CNPY_LIBRARY})
 
 include(GoogleTest)
 gtest_discover_tests(unittest)
