@@ -82,7 +82,7 @@ int main() {
                                                 N, eps);
 
 
-    save_npy(d_out2, N, "../layers/npy_verify/rmsnorm_warp_opt.npy");
+    // save_npy(d_out2, N, "../layers/npy_verify/rmsnorm_warp_opt.npy");
 
     return 0;
 }
