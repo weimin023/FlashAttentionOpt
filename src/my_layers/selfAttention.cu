@@ -4,6 +4,7 @@
 #include "common.h"
 
 #define WARP_SIZE 32
+#define theta 10000.0f
 
 template<int TILE_SIZE> __global__ void gemm_ABt_scale_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N, float scale) {
 
@@ -147,6 +148,34 @@ __global__ void cu_softmax_online_kernel(float *y, float *x, int len_q, int len_
     }
 }
 
+__global__ void cu_rope_f32_kernel(float2 *d_out, float2 *d_src, int seq_len, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= seq_len * N) return;
+    
+    float2 v = d_src[idx];
+
+    int token_pos = idx / N;
+    int token_idx = idx % N;
+
+    float exp_v = 1.0f / powf(theta, 2 * token_idx / (N * 2));
+    float sin_v = sinf(token_pos * exp_v);
+    float cos_v = cosf(token_pos * exp_v);
+
+    float2 r;
+    r.x = v.x * cos_v - v.y * sin_v;
+    r.y = v.x * sin_v + v.y * cos_v;
+
+    d_out[idx] = r;
+}
+
+void cu_rope(float *d_out, float *d_src, int seq_len, int N) {
+
+    int complex_pairs = seq_len * N;
+    dim3 threads(256);
+    int grids = (complex_pairs + threads.x - 1)/threads.x;
+    cu_rope_f32_kernel<<<grids, threads>>>(reinterpret_cast<float2*>(d_out), reinterpret_cast<float2*>(d_src), seq_len, N);
+}
+
 void cu_gemm_ABt_scale(int batch,
                         float *out,
                         const float *Q, // (batch, seq_len_q, d_k)
@@ -266,6 +295,26 @@ void test_cu_gemm_AB() {
 
     cu_gemm_AB(batch, d_C.data().get(), d_A.data().get(), d_B.data().get(), M, N, K);
     save_npy(d_C, batch, M, N, "../my_layers/npy_verify/cu_gemm_AB.npy");
+}
+
+void test_cu_rope() {
+    int seq_len = 4;
+    int N = 8;
+    int total_complex = seq_len * N;
+
+    thrust::host_vector<float> h_in(total_complex * 2);
+
+    for (int i = 0; i < total_complex; ++i) {
+        h_in[i * 2 + 0] = i;       // real
+        h_in[i * 2 + 1] = -i;      // imag
+    }
+
+    thrust::device_vector<float> d_in = h_in;
+    thrust::device_vector<float> d_out(total_complex * 2);
+
+    cu_rope(d_out.data().get(), d_in.data().get(), seq_len, N);
+
+    save_npy(d_out, seq_len, N, 2, "../my_layers/npy_verify/cu_rope.npy");
 }
 
 void test_cu_softmax_online() {

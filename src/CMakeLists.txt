@@ -10,11 +10,23 @@ set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --default-stream per-thread -std=c++17 -
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -lineinfo -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611")
 set(CMAKE_CUDA_FLAGS_DEBUG "-O0 -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611 -g -G")
 
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/layers
-)
+set(LIBTORCH_PATH "/home/weimin.chen/Downloads/libtorch")
 
+include_directories(
+    /usr/include/python3.10/
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/layers
+    ${LIBTORCH_PATH}/include
+    ${LIBTORCH_PATH}/include/torch/csrc/api/include
+)
 find_package(GTest REQUIRED)
+find_package(pybind11 REQUIRED)
+link_directories(${LIBTORCH_PATH}/lib)
+#-----------------------------------------------#
+#                   CUTLASS                     #
+#-----------------------------------------------#
+find_path(CUTLASS_INCLUDE_DIR cutlass/cutlass.h HINTS cutlass/include)
+find_path(CUTLASS_UTILS_INCLUDE_DIR cutlass/util/host_tensor.h HINTS cutlass/tools/util/include)
 
 # Find cnpy if installed system-wide
 find_path(CNPY_INCLUDE_DIR cnpy.h PATHS /usr/local/include /usr/include)
@@ -34,6 +46,20 @@ target_link_libraries(rmsnorm PRIVATE cudadevrt ${CNPY_LIBRARY})
 
 add_executable(selfAttention my_layers/selfAttention.cu)
 target_link_libraries(selfAttention PRIVATE cudadevrt ${CNPY_LIBRARY})
+
+add_executable(GEMM_cutlass_splitK my_layers/GEMM_cutlass_splitK.cu)
+target_link_libraries(GEMM_cutlass_splitK PRIVATE 
+    torch
+    c10
+    torch_cpu
+    torch_cuda
+)
+target_include_directories(GEMM_cutlass_splitK PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
+target_compile_options(GEMM_cutlass_splitK PRIVATE --expt-relaxed-constexpr)
+
+pybind11_add_module(my_cutlass my_layers/adaptor.cu)
+target_include_directories(my_cutlass PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
+target_link_libraries(my_cutlass PRIVATE ${TORCH_LIBRARIES})
 
 include(GoogleTest)
 gtest_discover_tests(unittest)
