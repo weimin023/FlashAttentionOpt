@@ -57,6 +57,16 @@ target_link_libraries(GEMM_cutlass_splitK PRIVATE
 target_include_directories(GEMM_cutlass_splitK PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_compile_options(GEMM_cutlass_splitK PRIVATE --expt-relaxed-constexpr)
 
+add_executable(GEMM_cutlass_default my_layers/GEMM_cutlass_default.cu)
+target_link_libraries(GEMM_cutlass_default PRIVATE 
+    torch
+    c10
+    torch_cpu
+    torch_cuda
+)
+target_include_directories(GEMM_cutlass_default PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
+target_compile_options(GEMM_cutlass_default PRIVATE --expt-relaxed-constexpr)
+
 pybind11_add_module(my_cutlass my_layers/adaptor.cu)
 target_include_directories(my_cutlass PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_link_libraries(my_cutlass PRIVATE ${TORCH_LIBRARIES})
