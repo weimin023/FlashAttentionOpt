@@ -6,11 +6,21 @@ enable_testing()
 set(CMAKE_CUDA_ARCHITECTURES 89)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} --default-stream per-thread -std=c++17 --expt-relaxed-constexpr -Xcompiler=-fPIE -Xcudafe --diag_suppress=611")
+list(APPEND CUDA_NVCC_FLAGS
+    --default-stream per-thread
+    -std=c++17
+    --expt-relaxed-constexpr
+    -Xcompiler=-fPIE
+    -Xcudafe
+    --diag_suppress=611
+)
+
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -lineinfo -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611")
 set(CMAKE_CUDA_FLAGS_DEBUG "-O0 -std=c++17 --extended-lambda -Xcudafe --diag_suppress=611 -g -G")
 
 set(LIBTORCH_PATH "/home/weimin.chen/Downloads/libtorch")
+set(CMAKE_PREFIX_PATH ${LIBTORCH_PATH})
+find_package(Torch REQUIRED)
 
 include_directories(
     /usr/include/python3.10/
@@ -21,6 +31,7 @@ include_directories(
 )
 find_package(GTest REQUIRED)
 find_package(pybind11 REQUIRED)
+
 link_directories(${LIBTORCH_PATH}/lib)
 #-----------------------------------------------#
 #                   CUTLASS                     #
@@ -45,9 +56,25 @@ add_executable(rmsnorm my_layers/RMSNorm.cu)
 target_link_libraries(rmsnorm PRIVATE cudadevrt ${CNPY_LIBRARY})
 
 add_executable(selfAttention my_layers/selfAttention.cu)
+target_include_directories(selfAttention PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_link_libraries(selfAttention PRIVATE cudadevrt ${CNPY_LIBRARY})
 
+add_executable(GEMM_cutlass_batched my_layers/GEMM_cutlass_batched.cu)
+target_include_directories(GEMM_cutlass_batched PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
+target_link_libraries(GEMM_cutlass_batched PRIVATE cudadevrt ${CNPY_LIBRARY})
+
+add_library(cuFMHA SHARED
+    my_layers/cuFMHA_bind.cpp
+    my_layers/cuFMHA.cu
+)
+target_include_directories(cuFMHA PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(cuFMHA PRIVATE ${TORCH_LIBRARIES} pybind11::module ${CNPY_LIBRARY})
+
+set_target_properties(cuFMHA PROPERTIES PREFIX "" SUFFIX ".so")
+
+
 add_executable(GEMM_cutlass_splitK my_layers/GEMM_cutlass_splitK.cu)
+
 target_link_libraries(GEMM_cutlass_splitK PRIVATE 
     torch
     c10
@@ -67,9 +94,9 @@ target_link_libraries(GEMM_cutlass_default PRIVATE
 target_include_directories(GEMM_cutlass_default PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_compile_options(GEMM_cutlass_default PRIVATE --expt-relaxed-constexpr)
 
-pybind11_add_module(my_cutlass my_layers/adaptor.cu)
-target_include_directories(my_cutlass PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
-target_link_libraries(my_cutlass PRIVATE ${TORCH_LIBRARIES})
+#pybind11_add_module(my_cutlass my_layers/adaptor.cu)
+#target_include_directories(my_cutlass PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
+#target_link_libraries(my_cutlass PRIVATE ${TORCH_LIBRARIES})
 
 include(GoogleTest)
 gtest_discover_tests(unittest)

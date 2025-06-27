@@ -1,6 +1,7 @@
 #include "GEMM_cutlass_splitK.cuh"
+#include "cutlass_common.cuh"
 
-void CutlassGEMMWrapper::init() {
+void CutlassGEMMSplitk::init() {
     cutlass::reference::host::TensorFillRandomUniform(A.host_view(), 1, ElementInputA(4), ElementInputA(-4), 0);
     cutlass::reference::host::TensorFillRandomUniform(B.host_view(), 1, ElementInputB(4), ElementInputB(-4), 0);
     cutlass::reference::host::TensorFill(C.host_view());
@@ -32,7 +33,7 @@ void CutlassGEMMWrapper::init() {
     }
 }
 
-bool CutlassGEMMWrapper::correctness_check() {
+bool CutlassGEMMSplitk::correctness_check() {
     Gemm_ref gemm_ref;
     cutlass::gemm::GemmCoord problem_size(M, N, K);
 
@@ -57,9 +58,9 @@ bool CutlassGEMMWrapper::correctness_check() {
     return passed;
 }
 
-float CutlassGEMMWrapper::benchmark(int iterations) {
+float CutlassGEMMSplitk::benchmark(int iterations) {
     // warmup
-    gemm_op();
+    CUTLASS_CHECK(gemm_op(args, workspace.get()));
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -68,7 +69,7 @@ float CutlassGEMMWrapper::benchmark(int iterations) {
     cudaEventRecord(start);
 
     for (int i = 0; i < iterations; ++i) {
-        gemm_op();
+        CUTLASS_CHECK(gemm_op(args, workspace.get()));
     }
 
     cudaEventRecord(stop);
@@ -87,7 +88,7 @@ int main() {
     std::vector<int> sizes = {16, 32, 64, 128, 256, 512, 1024};
 
     for (int size : sizes) {
-        CutlassGEMMWrapper gemm(size, size, size, 1);
+        CutlassGEMMSplitk gemm(size, size, size, 1);
         gemm.init();
 
         int M = size;

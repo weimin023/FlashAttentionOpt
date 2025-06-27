@@ -2,9 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import sys
 
 from my_layers.RMSNorm import RMSNorm
 
+sys.path.append("../")
+import cuFMHA
+                
 def test_rmsnorm():
     N = 128*128
     eps = 1e-5
@@ -33,6 +37,21 @@ def test_rmsnorm():
     #torch.testing.assert_close(out_cuda_warp, out_torch, rtol=1e-5, atol=1e-6)
 
     raise NotImplementedError
+
+def test_cu_gemm_cutlass_batch():
+    batch = 2
+    M = N = K = 32
+
+    a = torch.arange(batch*M*K).reshape(batch, M, K).float()
+    b = torch.arange(batch*N*K).reshape(batch, M, K).float()
+
+    c = torch.matmul(a, b)
+
+    out_cutlass = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/test_cu_gemm_cutlass_batch.npy")
+    out_cutlass = torch.from_numpy(out_cutlass)
+
+    # Compare outputs
+    torch.testing.assert_close(out_cutlass, c, rtol=1e-5, atol=1e-6)
 
 def test_gemm_ABt_scale():
     batch = 10
@@ -103,7 +122,7 @@ def test_online_softmax():
 
 def test_scaled_dot_product_attention():
     
-    batch = 10
+    batch = 2
     seq_len_q = 32
     seq_len_k = 32
     d_k = 32
@@ -128,11 +147,80 @@ def test_scaled_dot_product_attention():
                 h_V[i_b, i, j] = ((i * d_v + j) % 100) * 0.01  # roughly in [0, 1.0]
 
     # PyTorch S-DPA (non-causal)
-    torch_out = F.scaled_dot_product_attention(h_Q, h_K, h_V, attn_mask=None, is_causal=False)
+    torch_func_out = F.scaled_dot_product_attention(h_Q, h_K, h_V, attn_mask=None, is_causal=False)
 
     # load CUDA kernel output
-    cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention.npy")
-    cuda_out = torch.from_numpy(cuda_out).reshape((batch, seq_len_q, d_v))
+    #cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention.npy")
+    #cuda_out = torch.from_numpy(cuda_out).reshape((batch, seq_len_q, d_v))
+
+    cutlass_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy")
+    cutlass_out = torch.from_numpy(cutlass_out).reshape((batch, seq_len_q, seq_len_k))
 
     # Compare outputs
-    torch.testing.assert_close(cuda_out, torch_out, rtol=1e-5, atol=1e-6)
+    #torch.testing.assert_close(cuda_out, torch_func_out, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(cutlass_out, torch_func_out, rtol=1e-5, atol=1e-6)
+
+'''def test_multihead_attention():
+    B, S, D, H = 2, 8, 64, 4
+    D_head = D//H
+
+    torch.manual_seed(42)
+
+    x = torch.randn(B, S, D, device='cuda', dtype=torch.float32)
+
+    WQ = torch.randn(D, D, device='cuda') 
+    WK = torch.randn(D, D, device='cuda')
+    WV = torch.randn(D, D, device='cuda')
+    WO = torch.randn(D, D, device='cuda')
+
+    Q = x @ WQ # [B, S, D]
+    K = x @ WK
+    V = x @ WV
+
+    Q = Q.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()  # [B, H, S, D_head]
+    K = K.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()
+    V = V.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()
+
+    attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(D_head)
+    attn_scores = torch.tril(torch.ones(S, S, device='cuda')) * attn_scores - 1e9 * (1 - torch.tril(torch.ones(S, S, device='cuda')))
+    attn_weights = torch.softmax(attn_scores, dim=-1)
+    O = torch.matmul(attn_weights, V)
+
+    # reshape 回 [B, S, D]
+    O = O.permute(0, 2, 1, 3).contiguous().view(B, S, D)
+
+    # ==== 最後 Linear Projection ====
+    torch_out = O @ WO
+
+    # CUDA kernel output from cuFMHA
+    cu_out = cuFMHA.forward(Q, K, V)  # expect shape: [B, H, S, D_head]
+    cu_out = cu_out.permute(0, 2, 1, 3).contiguous().view(B, S, D)
+    cu_out = cu_out @ WO
+
+    # Compare
+    print("Max diff:", (torch_out - cu_out).abs().max().item())
+    assert torch.allclose(torch_out, cu_out, atol=1e-4), "Mismatch between PyTorch and cuFMHA"
+
+    print("✅ cuFMHA output matches PyTorch output!")'''
+
+def test_gemm_pybind():
+    # 模擬輸入參數
+    batch = 2
+    seq_len_q = 512
+    seq_len_k = 128
+    d_k = 32
+
+    torch.manual_seed(0)
+
+    # Q shape: [batch, seq_len_q, d_k]
+    Q = torch.randn(batch, seq_len_q, d_k, device='cuda', dtype=torch.float32)
+    # K shape: [batch, d_k, seq_len_k]
+    K = torch.randn(batch, d_k, seq_len_k, device='cuda', dtype=torch.float32)
+
+    # 你的 CUDA gemm_AB 函數計算結果
+    out_cuda = cuFMHA.gemm_test(Q, K)  # shape: [batch, seq_len_q, seq_len_k]
+
+    # PyTorch 參考計算
+    out_torch = torch.bmm(Q, K)
+
+    torch.testing.assert_close(out_cuda, out_torch, rtol=1e-5, atol=1e-6)

@@ -3,6 +3,9 @@
 #include <thrust/host_vector.h>
 #include "common.h"
 
+#include "cutlass_common.cuh"
+#include <cutlass/gemm/device/gemm_batched.h>
+
 #define WARP_SIZE 32
 #define theta 10000.0f
 
@@ -374,9 +377,125 @@ void test_cu_scaled_dot_product_attention() {
     save_npy(d_out, batch, seq_len_q, d_v, "../my_layers/npy_verify/cu_scaled_dot_product_attention.npy");
 }
 
+void cu_gemm_cutlass_batch(int batch, float *C, const float *A, const float *B, int M, int K, int N) {
+    using Element = float;
+    using Layout = cutlass::layout::RowMajor;
+
+    using GemmBatched_AB = cutlass::gemm::device::GemmBatched<
+        Element, Layout,
+        Element, Layout,
+        Element, Layout,
+        Element
+    >;
+
+    GemmBatched_AB::Arguments args(
+        {M, N, K},                         // M, N, K
+        {A, K},                           // A (Q)
+        M*K,
+        {B, N},                           // B (K)
+        K*N,
+        {C, N}, // C
+        M*N,
+        {C, N}, // D
+        M*N,
+        {1.0f, 0.0f},                                        // alpha, beta
+        batch                                                // batch count
+    );
+
+    GemmBatched_AB gemm;
+    CUTLASS_CHECK(gemm(args));
+}
+
+void cu_scaled_dot_product_attention_cutlass_batched(float *out,
+                                        const float *Q, // (batch, seq_len_q, d_k)
+                                        const float *K, // (batch, seq_len_k, d_k)
+                                        const float *V, // (batch, seq_len_k, d_v)
+                                        int seq_len_q,
+                                        int seq_len_k,
+                                        int d_k,
+                                        int d_v,
+                                        int batch) {
+
+    thrust::device_vector<float> d_QKT(batch * seq_len_q * seq_len_k);
+    thrust::device_vector<float> d_P(batch * seq_len_q * seq_len_k);
+
+    using Element = float;
+    using Layout = cutlass::layout::RowMajor;
+
+    using GemmBatched_QK = cutlass::gemm::device::GemmBatched<
+        Element, Layout,
+        Element, cutlass::layout::ColumnMajor,
+        Element, Layout,
+        Element
+    >;
+
+    float scale = 1.0f / std::sqrt(static_cast<float>(d_k));
+
+    GemmBatched_QK::Arguments args(
+        {seq_len_q, seq_len_k, d_k},                         // M, N, K
+        {Q, d_k},                           // A (Q)
+        seq_len_q * d_k,
+        {K, d_k},                           // B (K)
+        seq_len_k * d_k,
+        {d_QKT.data().get(), seq_len_k}, // C
+        seq_len_q * seq_len_k,
+        {d_QKT.data().get(), seq_len_k}, // D
+        seq_len_q * seq_len_k,
+        {scale, 0.0f},                                        // alpha, beta
+        batch                                                // batch count
+    );
+
+    GemmBatched_QK gemm;
+    CUTLASS_CHECK(gemm(args));
+
+    cu_softmax_online(d_P.data().get(), d_QKT.data().get(), seq_len_q, seq_len_k, batch);
+
+    cu_gemm_cutlass_batch(batch, out, d_P.data().get(), V, seq_len_q, seq_len_k, d_v);
+}
+
+void test_cu_scaled_dot_product_attention_cutlass_batched() {
+    int batch = 2;
+    int seq_len_q = 32;
+    int seq_len_k = 32;
+    int d_k = 32;
+    int d_v = 32;
+
+    thrust::host_vector<float> h_Q(batch*seq_len_q*d_k);
+    thrust::host_vector<float> h_K(batch*seq_len_k*d_k);
+    thrust::host_vector<float> h_V(batch*seq_len_k*d_v);
+
+    int M = seq_len_q;
+    int K = d_k;
+    int N = seq_len_k;
+
+    for (int i_b = 0; i_b < batch; ++i_b) {
+        for (int i=0;i<seq_len_q*d_k;++i) {
+            h_Q[i_b*M*K + i] = (i % 100) * 0.01 - 0.5;
+        }
+    
+        for (int i=0;i<seq_len_k*d_k;++i) {
+            h_K[i_b*N*K + i] = (i % 100) * 0.02 - 1;
+        }
+    
+        for (int i=0;i<seq_len_k*d_v;++i) {
+            h_V[i_b*N*d_v + i] = (i % 100) * 0.01;
+        }
+    }
+
+    thrust::device_vector<float> d_Q = h_Q;
+    thrust::device_vector<float> d_K = h_K;
+    thrust::device_vector<float> d_V = h_V;
+    thrust::device_vector<float> d_out(batch*seq_len_q*seq_len_k);
+
+    cu_scaled_dot_product_attention_cutlass_batched(d_out.data().get(), d_Q.data().get(), d_K.data().get(), d_V.data().get(), seq_len_q, seq_len_k, d_k, d_v, batch);
+
+    save_npy(d_out, batch, seq_len_q, seq_len_k, "../my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy");
+}
+
 int main() {
-    test_cu_softmax_online();
-    test_cu_gemm_ABt_scale();
-    test_cu_gemm_AB();
-    test_cu_scaled_dot_product_attention();
+    //test_cu_softmax_online();
+    //test_cu_gemm_ABt_scale();
+    //test_cu_gemm_AB();
+    //test_cu_scaled_dot_product_attention();
+    test_cu_scaled_dot_product_attention_cutlass_batched();
 }
