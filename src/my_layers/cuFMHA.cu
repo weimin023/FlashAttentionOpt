@@ -7,49 +7,34 @@
 
 
 template<int TILE_K>
-__global__ void fmha_kernel_multihead(
+__global__ void cu_fmha_kernel_multihead(
     const float* __restrict__ Q, // [B, H, S_q, D_head]
     const float* __restrict__ K, // [B, H, S_k, D_head]
     const float* __restrict__ V, // [B, H, S_k, D_head]
     float* __restrict__ O,       // [B, H, S_q, D_head]
     int B, int H, int S_q, int S_k, int D_head
 ) {
-    extern __shared__ float shm[];  // size: 2 * TILE_K * D_head floats
+    extern __shared__ float shm[];
 
     float* Ks = shm;
     float* Vs = shm + TILE_K * D_head;
+    float* Qs = Vs + TILE_K * D_head;
 
     int b = blockIdx.z;
     int h = blockIdx.y;
     int q_idx = blockIdx.x;  // one block per query row
     int tid = threadIdx.x;
 
-    // --- 初始化最大值與sum ---
     float m_i = -INFINITY;
     float l_i = 0.0f;
 
-    // Load Q vector for this (b,h,q_idx)
-    const float* q_ptr = Q + b*H*S_q*D_head + h*S_q*D_head + q_idx*D_head;
-    float q_vec[128]; // assume max D_head <= 128
+    const float *q_ptr = Q + b * H * S_q * D_head + h * S_q * D_head + q_idx * D_head;
 
-    // 初始化 q_vec 全為0 避免未初始化風險
-#pragma unroll
-    for (int i = 0; i < D_head; ++i) {
-        q_vec[i] = 0.0f;
-    }
-    for (int d = tid; d < D_head; d += blockDim.x) {
-        q_vec[d] = q_ptr[d];
-    }
-    __syncthreads();
+    if (tid >= D_head) return;
 
-    // 初始化 output accumulator o_vec
-    float o_vec[128];
-#pragma unroll
-    for (int i = 0; i < D_head; ++i) {
-        o_vec[i] = 0.0f;
-    }
+    Qs[tid] = q_ptr[tid];
 
-    // 總是要用 float scale 為 softmax 穩定性
+    float o = 0.0f;
     for (int t = 0; t < S_k; t += TILE_K) {
         int tile_size = min(TILE_K, S_k - t);
 
@@ -59,7 +44,6 @@ __global__ void fmha_kernel_multihead(
             Ks[threadIdx.y * D_head + tid] = K[b*H*S_k*D_head + h*S_k*D_head + k_idx*D_head + tid];
             Vs[threadIdx.y * D_head + tid] = V[b*H*S_k*D_head + h*S_k*D_head + k_idx*D_head + tid];
         } else if (tid < D_head) {
-            // 對超出部分給0，避免nan
             Ks[threadIdx.y * D_head + tid] = 0.0f;
             Vs[threadIdx.y * D_head + tid] = 0.0f;
         }
@@ -69,7 +53,7 @@ __global__ void fmha_kernel_multihead(
         for (int ki = 0; ki < tile_size; ++ki) {
             float dot = 0.0f;
             for (int d = 0; d < D_head; ++d) {
-                dot += q_vec[d] * Ks[ki * D_head + d];
+                dot += Qs[d] * Ks[ki * D_head + d];
             }
             dot /= sqrtf((float)D_head);
 
@@ -89,94 +73,76 @@ __global__ void fmha_kernel_multihead(
                 l_i = l_i * expf(prev_m - m_i) + exp_diff;
             }
 
-            // 更新輸出 o_vec
-            for (int d = 0; d < D_head; ++d) {
-                o_vec[d] = o_vec[d] * scale + Vs[ki * D_head + d] * (exp_diff / l_i);
-            }
+            // 更新輸出 Os
+            o = o * scale + Vs[ki * D_head + tid] * (exp_diff / l_i);
         }
         __syncthreads();
     }
 
     // 寫回 global memory
-    for (int d = tid; d < D_head; d += blockDim.x) {
-        O[b*H*S_q*D_head + h*S_q*D_head + q_idx*D_head + d] = o_vec[d];
-    }
+    O[b*H*S_q*D_head + h*S_q*D_head + q_idx*D_head + tid] = o;
 }
 
 
-void cu_flash_attn_multihead_v0(
-    const float* d_Q, const float* d_K, const float* d_V, float* d_O,
-    int B, int H, int S_q, int S_k, int D_head
-) {
-    constexpr int TILE_K = 8;  // 你可調整tile大小
+void test_cu_fmha_kernel_multihead() {
+    constexpr int TILE_K = 8;
 
-    dim3 grid(S_q, H, B);   // x=seq_q, y=num_heads, z=batch
+    int batch = 10;
+    int head = 5;
+    int seq_len_q = 32;
+    int d_head = 16;
+    int seq_len_k = 32;
+
+    thrust::host_vector<float> h_Q(batch*head*seq_len_q*d_head); // [batch, head, seq_len_q, d_head]
+    thrust::host_vector<float> h_K(batch*head*seq_len_k*d_head); // [batch, head, seq_len_k, d_head]
+    thrust::host_vector<float> h_V(batch*head*seq_len_k*d_head); // [batch, head, seq_len_k, d_head]
+
+    // Q[b,h,q,d] = b + h + 1 + 0.01*d
+    for (int b = 0; b < batch; ++b)
+        for (int h_ = 0; h_ < head; ++h_)
+            for (int q = 0; q < seq_len_q; ++q)
+                for (int d = 0; d < d_head; ++d) {
+                    int idx = (((b * head + h_) * seq_len_q + q) * d_head) + d;
+                    h_Q[idx] = static_cast<float>(b + h_ + 1.0 + 0.01 * d);
+                }
+
+    // K[b,h,k,d] = sin(k + d + b + h)
+    for (int b = 0; b < batch; ++b)
+        for (int h_ = 0; h_ < head; ++h_)
+            for (int k = 0; k < seq_len_k; ++k)
+                for (int d = 0; d < d_head; ++d) {
+                    int idx = (((b * head + h_) * seq_len_k + k) * d_head) + d;
+                    h_K[idx] = sinf(static_cast<float>(k + d + b + h_));
+                }
+
+    // V[b,h,k,d] = (b+1)*(h+1)*(k%d == d)
+    for (int b = 0; b < batch; ++b)
+        for (int h_ = 0; h_ < head; ++h_)
+            for (int k = 0; k < seq_len_k; ++k)
+                for (int d = 0; d < d_head; ++d) {
+                    int idx = (((b * head + h_) * seq_len_k + k) * d_head) + d;
+                    h_V[idx] = (k % d_head == d) ? float((b + 1) * (h_ + 1)) : 0.0f;
+                }
+
+    thrust::device_vector<float> d_Q = h_Q;
+    thrust::device_vector<float> d_K = h_K;
+    thrust::device_vector<float> d_V = h_V;
+    thrust::device_vector<float> d_O(batch*head*seq_len_q*d_head); // [batch, head, seq_len_q, d_head]
+
+    dim3 grid(seq_len_q, head, batch);   // x=seq_q, y=num_heads, z=batch
     dim3 block(128, TILE_K); // 128 thread x TILE_K blockDim.y
 
-    size_t shared_mem = 2 * TILE_K * D_head * sizeof(float);
+    size_t shared_mem = 3 * TILE_K * d_head * sizeof(float);
 
-    fmha_kernel_multihead<TILE_K><<<grid, block, shared_mem>>>(
-        d_Q, d_K, d_V, d_O, B, H, S_q, S_k, D_head
+    cu_fmha_kernel_multihead<TILE_K><<<grid, block, shared_mem>>>(
+        d_Q.data().get(), d_K.data().get(), d_V.data().get(), d_O.data().get(), batch, head, seq_len_q, seq_len_k, d_head
     );
+
+    save_npy(d_O, batch*head, seq_len_q, d_head, "../my_layers/npy_verify/cu_fmha_kernel_multihead.npy");
 }
 
+int main() {
+    test_cu_fmha_kernel_multihead();
 
-template<int TILE_SIZE> __global__ void gemm_AB_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N) {
-    int c = threadIdx.x;
-    int r = threadIdx.y;
-    
-    int col = threadIdx.x + blockIdx.x * blockDim.x;
-    int row = threadIdx.y + blockIdx.y * blockDim.y;
-    
-    int offset_A = blockIdx.z * M * K;
-    int offset_B = blockIdx.z * N * K;
-    int offset_C = blockIdx.z * M * N;
-
-    __shared__ float SA[TILE_SIZE][TILE_SIZE];
-    __shared__ float SB[TILE_SIZE][TILE_SIZE];
-
-    float reg_tile = 0;
-    for (int t = 0; t < K; t += TILE_SIZE) {
-
-        if (row < M && (t + c) < K) {
-            SA[r][c] = dA[offset_A + row * K + (t + c)];
-        } else {
-            SA[r][c] = 0;
-        }
-
-        // Load B with transposed access
-        // Original: SB[r][c] = dB[(t + r) * N + col];
-        // Transposed: Bᵗ[col][t + r] == B[t + r][col]
-        if (col < N && (t + r) < K) {
-            SB[r][c] = dB[offset_B + (t + r) * N + col];  // Notice the change
-        } else {
-            SB[r][c] = 0.0f;
-        }
-
-        __syncthreads();
-        
-        // accumulate sum
-        // global idx = i * N + j;
-        for (int k = 0; k < TILE_SIZE; ++k) {
-            reg_tile += SA[r][k] * SB[k][c];
-        }
-        
-    }
-
-    if (row < M && col < N) {
-        dC[offset_C + row * N + col] = reg_tile;
-    }
-}
-
-void cu_gemm_AB(int batch,
-    float *out,
-    const float *Q, // (batch, seq_len_q, d_k)
-    const float *K, // (batch, d_k, seq_len_k)
-    int seq_len_q,
-    int seq_len_k,
-    int d_k) {
-
-    dim3 threads(32, 32);  // TILE_SIZE x TILE_SIZE
-    dim3 grid((seq_len_k + threads.x - 1)/threads.x, (seq_len_q + threads.y - 1)/threads.y, batch);
-    gemm_AB_kernel<32><<<grid, threads>>>(Q, K, out, seq_len_q, d_k, seq_len_k);
+    return 0;
 }

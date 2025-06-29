@@ -122,11 +122,11 @@ def test_online_softmax():
 
 def test_scaled_dot_product_attention():
     
-    batch = 2
+    batch = 1
     seq_len_q = 32
     seq_len_k = 32
-    d_k = 32
-    d_v = 32
+    d_k = 64
+    d_v = 64
 
     # shape: (batch, seq_len, dim)
     h_Q = torch.zeros((batch, seq_len_q, d_k), dtype=torch.float32)
@@ -150,58 +150,58 @@ def test_scaled_dot_product_attention():
     torch_func_out = F.scaled_dot_product_attention(h_Q, h_K, h_V, attn_mask=None, is_causal=False)
 
     # load CUDA kernel output
-    #cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention.npy")
-    #cuda_out = torch.from_numpy(cuda_out).reshape((batch, seq_len_q, d_v))
+    cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention.npy")
+    cuda_out = torch.from_numpy(cuda_out).reshape((batch, seq_len_q, d_v))
 
     cutlass_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy")
-    cutlass_out = torch.from_numpy(cutlass_out).reshape((batch, seq_len_q, seq_len_k))
+    cutlass_out = torch.from_numpy(cutlass_out).reshape((batch, seq_len_q, d_v))
 
     # Compare outputs
     #torch.testing.assert_close(cuda_out, torch_func_out, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(cutlass_out, torch_func_out, rtol=1e-5, atol=1e-6)
 
-'''def test_multihead_attention():
-    B, S, D, H = 2, 8, 64, 4
-    D_head = D//H
+def test_cu_fmha_kernel_multihead():
+    import math
 
-    torch.manual_seed(42)
+    B, H, S_q, S_k, D_head = 10, 5, 32, 32, 16
 
-    x = torch.randn(B, S, D, device='cuda', dtype=torch.float32)
+    # Q[b,h,q,d] = b + h + 1 + 0.01*d
+    Q = torch.zeros(B, H, S_q, D_head)
+    for b in range(B):
+        for h in range(H):
+            for d in range(D_head):
+                Q[b, h, :, d] = b + h + 1.0 + 0.01 * d
 
-    WQ = torch.randn(D, D, device='cuda') 
-    WK = torch.randn(D, D, device='cuda')
-    WV = torch.randn(D, D, device='cuda')
-    WO = torch.randn(D, D, device='cuda')
+    # K[b,h,k,d] = sin(k + d + b + h)
+    K = torch.zeros(B, H, S_k, D_head)
+    for b in range(B):
+        for h in range(H):
+            for k in range(S_k):
+                for d in range(D_head):
+                    K[b, h, k, d] = torch.sin(torch.tensor(k + d + b + h, dtype=torch.float32))
 
-    Q = x @ WQ # [B, S, D]
-    K = x @ WK
-    V = x @ WV
+    # V[b,h,k,d] = (b+1)*(h+1)*(k%d_head == d)
+    V = torch.zeros(B, H, S_k, D_head)
+    for b in range(B):
+        for h in range(H):
+            for k in range(S_k):
+                d = k % D_head
+                V[b, h, k, d] = (b + 1) * (h + 1)
 
-    Q = Q.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()  # [B, H, S, D_head]
-    K = K.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()
-    V = V.view(B, S, H, D_head).permute(0, 2, 1, 3).contiguous()
+    # F.scaled_dot_product_attention 需要 [B*H, S, D]
+    Q_ = Q.reshape(B * H, S_q, D_head)
+    K_ = K.reshape(B * H, S_k, D_head)
+    V_ = V.reshape(B * H, S_k, D_head)
 
-    attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(D_head)
-    attn_scores = torch.tril(torch.ones(S, S, device='cuda')) * attn_scores - 1e9 * (1 - torch.tril(torch.ones(S, S, device='cuda')))
-    attn_weights = torch.softmax(attn_scores, dim=-1)
-    O = torch.matmul(attn_weights, V)
+    O = F.scaled_dot_product_attention(Q_, K_, V_, dropout_p=0.0, is_causal=False)
 
-    # reshape 回 [B, S, D]
-    O = O.permute(0, 2, 1, 3).contiguous().view(B, S, D)
+    # 轉回 [B, H, S_q, D_head]
+    O = O.reshape(B, H, S_q, D_head)
 
-    # ==== 最後 Linear Projection ====
-    torch_out = O @ WO
+    cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_fmha_kernel_multihead.npy")
+    cuda_out = torch.from_numpy(cuda_out).reshape((B, H, S_q, D_head))
 
-    # CUDA kernel output from cuFMHA
-    cu_out = cuFMHA.forward(Q, K, V)  # expect shape: [B, H, S, D_head]
-    cu_out = cu_out.permute(0, 2, 1, 3).contiguous().view(B, S, D)
-    cu_out = cu_out @ WO
-
-    # Compare
-    print("Max diff:", (torch_out - cu_out).abs().max().item())
-    assert torch.allclose(torch_out, cu_out, atol=1e-4), "Mismatch between PyTorch and cuFMHA"
-
-    print("✅ cuFMHA output matches PyTorch output!")'''
+    torch.testing.assert_close(O, cuda_out, rtol=1e-5, atol=1e-6)
 
 def test_gemm_pybind():
     # 模擬輸入參數

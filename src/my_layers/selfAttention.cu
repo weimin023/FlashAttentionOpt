@@ -218,11 +218,18 @@ void cu_scaled_dot_product_attention(float *out,
                                         int seq_len_k,
                                         int d_k,
                                         int d_v,
-                                        int batch) {
+                                        int batch,
+                                        float &elapsed_ms) {
 
     thrust::device_vector<float> d_QKT(batch * seq_len_q * seq_len_k);
     thrust::device_vector<float> d_P(batch * seq_len_q * seq_len_k);
     thrust::device_vector<float> d_O(batch * seq_len_q * d_v);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
 
     // step1: QK^T
     cu_gemm_ABt_scale(batch, d_QKT.data().get(), Q, K, seq_len_q, seq_len_k, d_k);
@@ -230,12 +237,20 @@ void cu_scaled_dot_product_attention(float *out,
     // step2: softmax
     cu_softmax_online(d_P.data().get(), d_QKT.data().get(), seq_len_q, seq_len_k, batch);
 
-    save_npy(d_P, batch, seq_len_q, seq_len_k, "../my_layers/npy_verify/tmp.npy");
-
     // step3: QK^T*V
-    cu_gemm_AB(batch, d_O.data().get(), d_P.data().get(), V, seq_len_q, seq_len_k, d_v);
+    cu_gemm_AB(batch, out, d_P.data().get(), V, seq_len_q, seq_len_k, d_v);
 
-    cudaMemcpy(out, d_O.data().get(), sizeof(float) * batch * seq_len_q * d_v, cudaMemcpyDeviceToDevice);
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    elapsed_ms = milliseconds;
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    // cudaMemcpy(out, d_O.data().get(), sizeof(float) * batch * seq_len_q * d_v, cudaMemcpyDeviceToDevice);
 }
 
 void test_cu_gemm_ABt_scale() {
@@ -339,11 +354,11 @@ void test_cu_softmax_online() {
 }
 
 void test_cu_scaled_dot_product_attention() {
-    int batch = 10;
+    int batch = 1;
     int seq_len_q = 32;
     int seq_len_k = 32;
-    int d_k = 32;
-    int d_v = 32;
+    int d_k = 64;
+    int d_v = 64;
 
     thrust::host_vector<float> h_Q(batch*seq_len_q*d_k);
     thrust::host_vector<float> h_K(batch*seq_len_k*d_k);
@@ -372,8 +387,14 @@ void test_cu_scaled_dot_product_attention() {
     thrust::device_vector<float> d_V = h_V;
     thrust::device_vector<float> d_out(batch*seq_len_q*d_v);
 
-    cu_scaled_dot_product_attention(d_out.data().get(), d_Q.data().get(), d_K.data().get(), d_V.data().get(), seq_len_q, seq_len_k, d_k, d_v, batch);
-
+    float avg = 0;
+    for (int t = 0; t < 10; ++t) {
+        float ms = 0;
+        cu_scaled_dot_product_attention(d_out.data().get(), d_Q.data().get(), d_K.data().get(), d_V.data().get(), seq_len_q, seq_len_k, d_k, d_v, batch, ms);
+        if (t > 3) avg += ms;
+    }
+    printf("elapsed time: %.3f ms\n", avg/7);
+    
     save_npy(d_out, batch, seq_len_q, d_v, "../my_layers/npy_verify/cu_scaled_dot_product_attention.npy");
 }
 
@@ -414,7 +435,8 @@ void cu_scaled_dot_product_attention_cutlass_batched(float *out,
                                         int seq_len_k,
                                         int d_k,
                                         int d_v,
-                                        int batch) {
+                                        int batch,
+                                        float &elapsed_ms) {
 
     thrust::device_vector<float> d_QKT(batch * seq_len_q * seq_len_k);
     thrust::device_vector<float> d_P(batch * seq_len_q * seq_len_k);
@@ -445,20 +467,38 @@ void cu_scaled_dot_product_attention_cutlass_batched(float *out,
         batch                                                // batch count
     );
 
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+
+    //-------------------------------------
     GemmBatched_QK gemm;
     CUTLASS_CHECK(gemm(args));
 
     cu_softmax_online(d_P.data().get(), d_QKT.data().get(), seq_len_q, seq_len_k, batch);
 
     cu_gemm_cutlass_batch(batch, out, d_P.data().get(), V, seq_len_q, seq_len_k, d_v);
+    //-------------------------------------
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+    elapsed_ms = milliseconds;
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 }
 
 void test_cu_scaled_dot_product_attention_cutlass_batched() {
-    int batch = 2;
+    int batch = 1;
     int seq_len_q = 32;
     int seq_len_k = 32;
-    int d_k = 32;
-    int d_v = 32;
+    int d_k = 64;
+    int d_v = 64;
 
     thrust::host_vector<float> h_Q(batch*seq_len_q*d_k);
     thrust::host_vector<float> h_K(batch*seq_len_k*d_k);
@@ -485,17 +525,24 @@ void test_cu_scaled_dot_product_attention_cutlass_batched() {
     thrust::device_vector<float> d_Q = h_Q;
     thrust::device_vector<float> d_K = h_K;
     thrust::device_vector<float> d_V = h_V;
-    thrust::device_vector<float> d_out(batch*seq_len_q*seq_len_k);
+    thrust::device_vector<float> d_out(batch*seq_len_q*d_v);
 
-    cu_scaled_dot_product_attention_cutlass_batched(d_out.data().get(), d_Q.data().get(), d_K.data().get(), d_V.data().get(), seq_len_q, seq_len_k, d_k, d_v, batch);
-
-    save_npy(d_out, batch, seq_len_q, seq_len_k, "../my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy");
+    float avg = 0;
+    for (int t = 0; t < 10; ++t) {
+        float ms = 0;
+        cu_scaled_dot_product_attention_cutlass_batched(d_out.data().get(), d_Q.data().get(), d_K.data().get(), d_V.data().get(), seq_len_q, seq_len_k, d_k, d_v, batch, ms);
+        
+        if (t > 3) avg += ms;
+    }
+    printf("CUTLASS elapsed time: %.3f ms\n", avg/7);
+    
+    save_npy(d_out, batch, seq_len_q, d_v, "../my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy");
 }
 
 int main() {
     //test_cu_softmax_online();
     //test_cu_gemm_ABt_scale();
     //test_cu_gemm_AB();
-    //test_cu_scaled_dot_product_attention();
+    test_cu_scaled_dot_product_attention();
     test_cu_scaled_dot_product_attention_cutlass_batched();
 }

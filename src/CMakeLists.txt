@@ -63,15 +63,9 @@ add_executable(GEMM_cutlass_batched my_layers/GEMM_cutlass_batched.cu)
 target_include_directories(GEMM_cutlass_batched PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_link_libraries(GEMM_cutlass_batched PRIVATE cudadevrt ${CNPY_LIBRARY})
 
-add_library(cuFMHA SHARED
-    my_layers/cuFMHA_bind.cpp
-    my_layers/cuFMHA.cu
-)
+add_executable(cuFMHA my_layers/cuFMHA.cu)
 target_include_directories(cuFMHA PRIVATE ${TORCH_INCLUDE_DIRS})
 target_link_libraries(cuFMHA PRIVATE ${TORCH_LIBRARIES} pybind11::module ${CNPY_LIBRARY})
-
-set_target_properties(cuFMHA PROPERTIES PREFIX "" SUFFIX ".so")
-
 
 add_executable(GEMM_cutlass_splitK my_layers/GEMM_cutlass_splitK.cu)
 
