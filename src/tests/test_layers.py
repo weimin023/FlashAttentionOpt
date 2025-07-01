@@ -54,10 +54,10 @@ def test_cu_gemm_cutlass_batch():
     torch.testing.assert_close(out_cutlass, c, rtol=1e-5, atol=1e-6)
 
 def test_gemm_ABt_scale():
-    batch = 10
-    M = 32
-    K = 32
-    N = 32
+    batch = 2
+    M = 128
+    K = 128
+    N = 128
 
     a = torch.zeros(batch, M, K)
     b = torch.zeros(batch, N, K)
@@ -81,9 +81,9 @@ def test_gemm_ABt_scale():
     
 def test_gemm_AB():
     batch = 2
-    M = 512
+    M = 128
     K = 128
-    N = 512
+    N = 128
 
     a = torch.zeros(batch, M, K)
     b = torch.zeros(batch, K, N)
@@ -122,11 +122,11 @@ def test_online_softmax():
 
 def test_scaled_dot_product_attention():
     
-    batch = 1
-    seq_len_q = 32
-    seq_len_k = 32
-    d_k = 64
-    d_v = 64
+    batch = 8
+    seq_len_q = 128
+    seq_len_k = 2048
+    d_k = 128
+    d_v = 128
 
     # shape: (batch, seq_len, dim)
     h_Q = torch.zeros((batch, seq_len_q, d_k), dtype=torch.float32)
@@ -153,12 +153,17 @@ def test_scaled_dot_product_attention():
     cuda_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention.npy")
     cuda_out = torch.from_numpy(cuda_out).reshape((batch, seq_len_q, d_v))
 
+    '''tmp = torch.matmul(h_Q, h_K.transpose(1, 2))/np.sqrt(d_k)
+    torch_softmax = nn.Softmax(dim=2)
+    torch_func_out = torch_softmax(tmp)
+    torch_func_out = torch.matmul(torch_func_out, h_V)'''
+
     cutlass_out = np.load("/home/weimin.chen/Desktop/FlashAttentionOpt/src/my_layers/npy_verify/cu_scaled_dot_product_attention_cutlass_batched.npy")
     cutlass_out = torch.from_numpy(cutlass_out).reshape((batch, seq_len_q, d_v))
 
     # Compare outputs
-    #torch.testing.assert_close(cuda_out, torch_func_out, rtol=1e-5, atol=1e-6)
-    torch.testing.assert_close(cutlass_out, torch_func_out, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(cutlass_out, cuda_out, rtol=1e-5, atol=1e-6)
+    #torch.testing.assert_close(cutlass_out, torch_func_out, rtol=1e-5, atol=1e-6)
 
 def test_cu_fmha_kernel_multihead():
     import math

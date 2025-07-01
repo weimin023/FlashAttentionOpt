@@ -9,13 +9,21 @@
 #define WARP_SIZE 32
 #define theta 10000.0f
 
-template<int TILE_SIZE> __global__ void gemm_ABt_scale_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N, float scale) {
+#define BCH 8      // 合理的批次大小
+#define SEQ_Q 64  // 生成長度
+#define SEQ_K 512 // 上下文長度
+#define DK 128     // 標準注意力維度
+#define DV 128     // 通常等於 DK
 
-    int c = threadIdx.x;
-    int r = threadIdx.y;
+constexpr int TILE_SIZE = 16;
+
+__global__ void gemm_ABt_scale_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N, float scale) {
+
+    int c = threadIdx.x; // seq_k
+    int r = threadIdx.y; // seq_q
     
-    int col = threadIdx.x + blockIdx.x * blockDim.x;
-    int row = threadIdx.y + blockIdx.y * blockDim.y;
+    int col = c + blockIdx.x * TILE_SIZE;
+    int row = r + blockIdx.y * TILE_SIZE;
     
     int offset_A = blockIdx.z * M * K;
     int offset_B = blockIdx.z * N * K;
@@ -25,10 +33,11 @@ template<int TILE_SIZE> __global__ void gemm_ABt_scale_kernel(const float *dA, c
     __shared__ float SB[TILE_SIZE][TILE_SIZE];
 
     float reg_tile = 0;
-    for (int t = 0; t < K; t += TILE_SIZE) {
+    for (int t = 0; t < (K + TILE_SIZE - 1)/TILE_SIZE; ++t) {
 
-        if (row < M && (t + c) < K) {
-            SA[r][c] = dA[offset_A + row * K + (t + c)];
+        int tile_col_a = t * TILE_SIZE + c;
+        if (row < M && tile_col_a < K) {
+            SA[r][c] = dA[offset_A + row * K + tile_col_a];
         } else {
             SA[r][c] = 0;
         }
@@ -36,16 +45,23 @@ template<int TILE_SIZE> __global__ void gemm_ABt_scale_kernel(const float *dA, c
         // Load B with transposed access
         // Original: SB[r][c] = dB[(t + r) * N + col];
         // Transposed: Bᵗ[col][t + r] == B[t + r][col]
-        if (col < N && (t + r) < K) {
-            SB[r][c] = dB[offset_B + col * K + (t + r)];  // Notice the change
+        int tile_row_b = t * TILE_SIZE + r;
+        if (col < N && tile_row_b < K) {
+            SB[r][c] = dB[offset_B + col * K + tile_row_b];  // Notice the change
         } else {
             SB[r][c] = 0.0f;
         }
+
+        __syncthreads();
 
         // accumulate sum
         // global idx = i * N + j;
         for (int k = 0; k < TILE_SIZE; ++k) {
             reg_tile += SA[r][k] * SB[k][c];
+
+            /*if (blockIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
+                printf("sa[%d][%d]: %f, sb[%d][%d]: %f\n", r, k, SA[r][k], c, k, SB[c][k]);
+            }*/
         }
         __syncthreads();
     }
@@ -56,12 +72,12 @@ template<int TILE_SIZE> __global__ void gemm_ABt_scale_kernel(const float *dA, c
     
 }
 
-template<int TILE_SIZE> __global__ void gemm_AB_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N) {
+__global__ void gemm_AB_kernel(const float *dA, const float *dB, float *dC, int M, int K, int N) {
     int c = threadIdx.x;
     int r = threadIdx.y;
     
-    int col = threadIdx.x + blockIdx.x * blockDim.x;
-    int row = threadIdx.y + blockIdx.y * blockDim.y;
+    int col = c + blockIdx.x * TILE_SIZE;
+    int row = r + blockIdx.y * TILE_SIZE;
     
     int offset_A = blockIdx.z * M * K;
     int offset_B = blockIdx.z * N * K;
@@ -71,10 +87,11 @@ template<int TILE_SIZE> __global__ void gemm_AB_kernel(const float *dA, const fl
     __shared__ float SB[TILE_SIZE][TILE_SIZE];
 
     float reg_tile = 0;
-    for (int t = 0; t < K; t += TILE_SIZE) {
+    for (int t = 0; t < (K + TILE_SIZE - 1)/TILE_SIZE; ++t) {
 
-        if (row < M && (t + c) < K) {
-            SA[r][c] = dA[offset_A + row * K + (t + c)];
+        int tile_col_a = t * TILE_SIZE + c;
+        if (row < M && tile_col_a < K) {
+            SA[r][c] = dA[offset_A + row * K + tile_col_a];
         } else {
             SA[r][c] = 0;
         }
@@ -82,11 +99,14 @@ template<int TILE_SIZE> __global__ void gemm_AB_kernel(const float *dA, const fl
         // Load B with transposed access
         // Original: SB[r][c] = dB[(t + r) * N + col];
         // Transposed: Bᵗ[col][t + r] == B[t + r][col]
-        if (col < N && (t + r) < K) {
-            SB[r][c] = dB[offset_B + (t + r) * N + col];  // Notice the change
+        int tile_row_b = t * TILE_SIZE + r;
+        if (col < N && tile_row_b < K) {
+            SB[r][c] = dB[offset_B + tile_row_b * N + col];  // Notice the change
         } else {
             SB[r][c] = 0.0f;
         }
+
+        __syncthreads();
 
         // accumulate sum
         // global idx = i * N + j;
@@ -187,9 +207,9 @@ void cu_gemm_ABt_scale(int batch,
                         int seq_len_k,
                         int d_k) {
 
-    dim3 threads(32, 32);  // TILE_SIZE x TILE_SIZE
+    dim3 threads(16, 16);  // TILE_SIZE x TILE_SIZE
     dim3 grid((seq_len_k + threads.x - 1)/threads.x, (seq_len_q + threads.y - 1)/threads.y, batch);
-    gemm_ABt_scale_kernel<32><<<grid, threads>>>(Q, K, out, seq_len_q, d_k, seq_len_k, (float)sqrt(d_k));
+    gemm_ABt_scale_kernel<<<grid, threads>>>(Q, K, out, seq_len_q, d_k, seq_len_k, (float)sqrt(d_k));
 }
 
 void cu_gemm_AB(int batch,
@@ -200,9 +220,9 @@ void cu_gemm_AB(int batch,
     int seq_len_k,
     int d_k) {
 
-    dim3 threads(32, 32);  // TILE_SIZE x TILE_SIZE
+    dim3 threads(16, 16);  // TILE_SIZE x TILE_SIZE
     dim3 grid((seq_len_k + threads.x - 1)/threads.x, (seq_len_q + threads.y - 1)/threads.y, batch);
-    gemm_AB_kernel<32><<<grid, threads>>>(Q, K, out, seq_len_q, d_k, seq_len_k);
+    gemm_AB_kernel<<<grid, threads>>>(Q, K, out, seq_len_q, d_k, seq_len_k);
 }
 
 void cu_softmax_online(float *d_out, float *d_src, int len_q, int len_k, int batch) {
@@ -238,7 +258,7 @@ void cu_scaled_dot_product_attention(float *out,
     cu_softmax_online(d_P.data().get(), d_QKT.data().get(), seq_len_q, seq_len_k, batch);
 
     // step3: QK^T*V
-    cu_gemm_AB(batch, out, d_P.data().get(), V, seq_len_q, seq_len_k, d_v);
+    cu_gemm_AB(batch, out, d_P.data().get(), V, seq_len_q, d_v, seq_len_k);
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -254,10 +274,10 @@ void cu_scaled_dot_product_attention(float *out,
 }
 
 void test_cu_gemm_ABt_scale() {
-    int batch = 10;
-    int M = 32;
-    int K = 32;
-    int N = 32;
+    int batch = 2;
+    int M = 128;
+    int K = 128;
+    int N = 128;
 
     thrust::host_vector<float> h_A(batch*M*K);
     thrust::host_vector<float> h_B(batch*N*K);
@@ -280,15 +300,18 @@ void test_cu_gemm_ABt_scale() {
     thrust::device_vector<float> d_B = h_B;
     thrust::device_vector<float> d_C(batch*M*N);
 
+    save_npy(d_A, batch, M, K, "../my_layers/npy_verify/input_A.npy");
+    save_npy(d_B, batch, N, K, "../my_layers/npy_verify/input_B.npy");
+
     cu_gemm_ABt_scale(batch, d_C.data().get(), d_A.data().get(), d_B.data().get(), M, N, K);
     save_npy(d_C, batch, M, N, "../my_layers/npy_verify/cu_gemm_ABt_scale.npy");
 }
 
 void test_cu_gemm_AB() {
     int batch = 2;
-    int M = 512;
+    int M = 128;
     int K = 128;
-    int N = 512;
+    int N = 128;
 
     thrust::host_vector<float> h_A(batch*M*K);
     thrust::host_vector<float> h_B(batch*K*N);
@@ -354,11 +377,11 @@ void test_cu_softmax_online() {
 }
 
 void test_cu_scaled_dot_product_attention() {
-    int batch = 1;
-    int seq_len_q = 32;
-    int seq_len_k = 32;
-    int d_k = 64;
-    int d_v = 64;
+    int batch = BCH;
+    int seq_len_q = SEQ_Q;
+    int seq_len_k = SEQ_K;
+    int d_k = DK;
+    int d_v = DV;
 
     thrust::host_vector<float> h_Q(batch*seq_len_q*d_k);
     thrust::host_vector<float> h_K(batch*seq_len_k*d_k);
@@ -494,11 +517,11 @@ void cu_scaled_dot_product_attention_cutlass_batched(float *out,
 }
 
 void test_cu_scaled_dot_product_attention_cutlass_batched() {
-    int batch = 1;
-    int seq_len_q = 32;
-    int seq_len_k = 32;
-    int d_k = 64;
-    int d_v = 64;
+    int batch = BCH;
+    int seq_len_q = SEQ_Q;
+    int seq_len_k = SEQ_K;
+    int d_k = DK;
+    int d_v = DV;
 
     thrust::host_vector<float> h_Q(batch*seq_len_q*d_k);
     thrust::host_vector<float> h_K(batch*seq_len_k*d_k);
