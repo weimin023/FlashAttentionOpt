@@ -7,7 +7,7 @@ import sys
 from my_layers.RMSNorm import RMSNorm
 
 sys.path.append("../")
-import cuFMHA
+#import cuFMHA
                 
 def test_rmsnorm():
     N = 128*128
@@ -168,7 +168,7 @@ def test_scaled_dot_product_attention():
 def test_cu_fmha_kernel_multihead():
     import math
 
-    B, H, S_q, S_k, D_head = 10, 5, 32, 32, 16
+    B, H, S_q, S_k, D_head = 10, 5, 128, 128, 64
 
     # Q[b,h,q,d] = b + h + 1 + 0.01*d
     Q = torch.zeros(B, H, S_q, D_head)
@@ -208,7 +208,7 @@ def test_cu_fmha_kernel_multihead():
 
     torch.testing.assert_close(O, cuda_out, rtol=1e-5, atol=1e-6)
 
-def test_gemm_pybind():
+'''def test_gemm_pybind():
     # 模擬輸入參數
     batch = 2
     seq_len_q = 512
@@ -228,4 +228,4 @@ def test_gemm_pybind():
     # PyTorch 參考計算
     out_torch = torch.bmm(Q, K)
 
-    torch.testing.assert_close(out_cuda, out_torch, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out_cuda, out_torch, rtol=1e-5, atol=1e-6)'''

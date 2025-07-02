@@ -84,14 +84,14 @@ __global__ void cu_fmha_kernel_multihead(
 }
 
 
-void test_cu_fmha_kernel_multihead() {
+void test_cu_fmha_kernel_multihead(int B, int H, int SEQ_Q, int SEQ_K, int D_HEAD) {
     constexpr int TILE_K = 8;
 
-    int batch = 10;
-    int head = 5;
-    int seq_len_q = 32;
-    int d_head = 16;
-    int seq_len_k = 32;
+    int batch = B;
+    int head = H;
+    int seq_len_q = SEQ_Q;
+    int d_head = D_HEAD;
+    int seq_len_k = SEQ_K;
 
     thrust::host_vector<float> h_Q(batch*head*seq_len_q*d_head); // [batch, head, seq_len_q, d_head]
     thrust::host_vector<float> h_K(batch*head*seq_len_k*d_head); // [batch, head, seq_len_k, d_head]
@@ -134,15 +134,42 @@ void test_cu_fmha_kernel_multihead() {
 
     size_t shared_mem = 3 * TILE_K * d_head * sizeof(float);
 
-    cu_fmha_kernel_multihead<TILE_K><<<grid, block, shared_mem>>>(
-        d_Q.data().get(), d_K.data().get(), d_V.data().get(), d_O.data().get(), batch, head, seq_len_q, seq_len_k, d_head
-    );
+    float avg = 0;
+    for (int t = 0; t < 10; ++t) {
+        float ms = 0;
+
+        // ======================================
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        cudaEventRecord(start);
+
+        cu_fmha_kernel_multihead<TILE_K><<<grid, block, shared_mem>>>(
+            d_Q.data().get(), d_K.data().get(), d_V.data().get(), d_O.data().get(), batch, head, seq_len_q, seq_len_k, d_head
+        );
+
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+
+        cudaEventElapsedTime(&ms, start, stop);
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        // ======================================
+        if (t > 3) avg += ms;
+    }
+    printf("Batch: %d, CUDA FMHA elapsed time: %.3f ms\n", batch, avg/7);
 
     save_npy(d_O, batch*head, seq_len_q, d_head, "../my_layers/npy_verify/cu_fmha_kernel_multihead.npy");
 }
 
 int main() {
-    test_cu_fmha_kernel_multihead();
 
+    std::vector<int> B{1, 2, 4, 8, 16, 32, 64};
+    for (int b:B) {
+        test_cu_fmha_kernel_multihead(b, 8, 128, 128, 64);
+    }
+    
     return 0;
 }
