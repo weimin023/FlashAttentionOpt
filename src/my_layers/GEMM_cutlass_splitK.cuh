@@ -69,6 +69,7 @@ public:
           A({M, K}), B({K, N}), C({M, N}), D({M, N}), D_ref({M, N}) {}
 
     void init();
+    void load_data_from_host(const float* a_host, const float* b_host);
 
     bool correctness_check();
 

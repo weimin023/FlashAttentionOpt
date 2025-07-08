@@ -59,6 +59,10 @@ add_executable(selfAttention my_layers/selfAttention.cu)
 target_include_directories(selfAttention PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_link_libraries(selfAttention PRIVATE cudadevrt ${CNPY_LIBRARY})
 
+add_executable(gemm_benchmark my_layers/GEMM_benchmark.cu)
+target_include_directories(gemm_benchmark PRIVATE ${TORCH_INCLUDE_DIRS})
+target_link_libraries(gemm_benchmark PRIVATE ${TORCH_LIBRARIES} cudadevrt cublas)
+
 add_executable(GEMM_cutlass_batched my_layers/GEMM_cutlass_batched.cu)
 target_include_directories(GEMM_cutlass_batched PRIVATE ${CUTLASS_INCLUDE_DIR} ${CUTLASS_UTILS_INCLUDE_DIR})
 target_link_libraries(GEMM_cutlass_batched PRIVATE cudadevrt ${CNPY_LIBRARY})

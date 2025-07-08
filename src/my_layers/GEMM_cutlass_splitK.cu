@@ -33,6 +33,16 @@ void CutlassGEMMSplitk::init() {
     }
 }
 
+void CutlassGEMMSplitk::load_data_from_host(const float* a_host, const float* b_host) {
+    // copy a_host (size M x K) into A
+    std::memcpy(A.host_data(), a_host, sizeof(float) * M * K);
+    // copy b_host (size K x N) into B
+    std::memcpy(B.host_data(), b_host, sizeof(float) * K * N);
+
+    A.sync_device();
+    B.sync_device();
+}
+
 bool CutlassGEMMSplitk::correctness_check() {
     Gemm_ref gemm_ref;
     cutlass::gemm::GemmCoord problem_size(M, N, K);
@@ -61,6 +71,7 @@ bool CutlassGEMMSplitk::correctness_check() {
 float CutlassGEMMSplitk::benchmark(int iterations) {
     // warmup
     CUTLASS_CHECK(gemm_op(args, workspace.get()));
+    cudaDeviceSynchronize();
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -75,6 +86,8 @@ float CutlassGEMMSplitk::benchmark(int iterations) {
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
+    cudaDeviceSynchronize();
+    
     float elapsed_ms;
     cudaEventElapsedTime(&elapsed_ms, start, stop);
 
@@ -85,7 +98,7 @@ float CutlassGEMMSplitk::benchmark(int iterations) {
 }
 
 int main() {
-    std::vector<int> sizes = {16, 32, 64, 128, 256, 512, 1024};
+    std::vector<int> sizes = {128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384};
 
     for (int size : sizes) {
         CutlassGEMMSplitk gemm(size, size, size, 1);
@@ -96,9 +109,9 @@ int main() {
         int K = size;
         float elapsed_ms = gemm.benchmark(10);
 
-        double tflops = 2.0 * M * N * K / (elapsed_ms * 1e6);
+        double gflops = 2.0 * M * N * K / (elapsed_ms * 1e-3) / 1024 / 1024 / 1024;
         if (gemm.correctness_check()) {
-            printf("size: %d, TFLOPS: %f\n", size, tflops);
+            printf("size: %d, elapsed_ms: %f, GFLOPS: %f\n", size, elapsed_ms, gflops);
         }
     }
 
