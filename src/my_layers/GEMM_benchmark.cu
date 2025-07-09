@@ -458,14 +458,17 @@ int main(void) {
     cublasHandle_t handle;
     cublasCreate(&handle);
 
-    printf("\nKernal = sgemm_2D_tile_vectorized\n");
+    printf("\nKernal = sgemmDoubleBuffering\n");
     const int outer_repeat = 10, inner_repeat = 1;
-    const int BM = 128, BN = 128, TM = 8, TN = 8;
-    void (*gpuSgemm) (float *, float *, float *, const int, const int, const int) = sgemm_2D_tile_vectorized<BM, BN, 32, TM, TN>/*, sgemm_naive_coalescing<32>*/;
+    constexpr int NUM_THREADS = 256;
+    const int BM = 128, BN = 128, WM = 64, WN = 64, WNiter = 2, TM = 8, TN = 8;
+    void (*gpuSgemm) (float *, float *, float *, const int, const int, const int) = sgemmDoubleBuffering<BM, BN, 32, WM, WN, WNiter, TM, TN, NUM_THREADS>/*, sgemm_naive_coalescing<32>*/;
 
     {
         const int M = 512, N = 512, K = 512;
-        dim3 blockDim((BM/TM) * (BN/TN));
+        //dim3 blockDim((BM/TM) * (BN/TN));
+        //dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
+        dim3 blockDim(NUM_THREADS);
         dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
         float max_error = testError(gpuSgemm, gridDim, blockDim, M, N, K);
         printf("Max Error = %f\n", max_error);
@@ -479,7 +482,9 @@ int main(void) {
     for (int i = 0; i < TESTNUM; i++) {
         const int M = M_list[i], N = N_list[i], K = K_list[i];
 
-        dim3 blockDim((BM/TM) * (BN/TN));
+        //dim3 blockDim((BM/TM) * (BN/TN));
+        //dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
+        dim3 blockDim(NUM_THREADS);
         dim3 gridDim((N + BN - 1) / BN, (M + BM - 1) / BM);
 
         double max_sec = 0.0;
